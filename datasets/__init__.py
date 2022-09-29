@@ -1,0 +1,1 @@
+from .lyrics_only import LyricsOnly
