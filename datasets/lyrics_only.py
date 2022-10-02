@@ -9,15 +9,32 @@ import soundfile as sf
 
 
 class LyricsOnly(Dataset):
-    def __init__(self, ds_path, audio_segment_dir=None, audio_duration=5, ignore_empty=True, split_audio=True):
+    def __init__(self, ds_path, audio_segment_dir=None, audio_duration=5, ignore_empty=True, split_audio=True, save_songs=True, save_pre_fourier=True, save_fourier=True, rgb_grouping=True, save_collapsed=True):
         self.ds_path = ds_path
         self.audio_duration = audio_duration
         self.ignore_empty = ignore_empty
+        self.save_songs = save_songs
+        self.save_pre_fourier = save_pre_fourier
+        self.save_fourier = save_fourier
+        self.rgb_grouping = rgb_grouping
+        self.save_collapsed = save_collapsed
         if audio_segment_dir is None:
             audio_segment_dir = os.path.join(ds_path, '..', 'audio_segments')
         self.audio_segment_dir = audio_segment_dir
+        if rgb_grouping:
+            self.track_to_channel = {'vocals': 0,
+                                     'song': 1, 'guitar': 1, 'rhythm': 1,
+                                     'drums_1': 2, 'drums_2': 2, 'drums_3': 2, 'drums_4': 2,
+                                     }
+        else:
+            self.track_to_channel = {'vocals': 0, 'song': 1, 'guitar': 2, 'rhythm': 3,
+                                     'drums_1': 4, 'drums_2': 5, 'drums_3': 6, 'drums_4': 7}
         if split_audio:
             self._split_audio_to_segments()
+
+
+
+
 
     def _split_audio_to_segments(self):
         for dir in os.listdir(self.ds_path):
@@ -28,25 +45,56 @@ class LyricsOnly(Dataset):
                     continue
                 print('working on song: {}'.format(dir))
                 t2lyrics = self.cut_lyrics_to_parts(midi_file_path, self.audio_duration)
-
+                pre_fourier_per_section = dict()
+                fourier_per_section = dict()
                 # opening other audio files and cutting them to parts according to lyrics
                 for audio_file in os.listdir(dir_path):
-                    if audio_file.endswith('.ogg'):
+                    if audio_file.endswith('.ogg') and audio_file[:-4] in self.track_to_channel:
                         audio_file_path = os.path.join(dir_path, audio_file)
                         audio, samplerate = sf.read(audio_file_path)
                         for i, ((t_start, t_end), lyrics) in enumerate(t2lyrics.items()):
-                            if len(lyrics) > 0 or not self.ignore_empty:
-                                # making sure all directories exist
-                                if not os.path.isdir(self.audio_segment_dir):
-                                    os.makedirs(self.audio_segment_dir)
-                                processed_song_dir = os.path.join(self.audio_segment_dir, dir)
-                                if not os.path.isdir(processed_song_dir):
-                                    os.makedirs(processed_song_dir)
-                                processed_section_dir = os.path.join(processed_song_dir, f'section_{i}_{lyrics}')
-                                if not os.path.isdir(processed_section_dir):
-                                    os.makedirs(processed_section_dir)
-                                temp_audio = audio[int(t_start * samplerate):int(t_end * samplerate)]
-                                sf.write(os.path.join(processed_section_dir, audio_file), temp_audio, samplerate)
+                            # print(f'section {i}: {lyrics}, {len(lyrics)}')
+                            if len(lyrics) <= 3 and self.ignore_empty:
+                                continue
+                            # making sure all directories exist
+                            if not os.path.isdir(self.audio_segment_dir):
+                                os.makedirs(self.audio_segment_dir)
+                            processed_song_dir = os.path.join(self.audio_segment_dir, dir)
+                            if not os.path.isdir(processed_song_dir):
+                                os.makedirs(processed_song_dir)
+                            processed_section_dir = os.path.join(processed_song_dir, f'section_{i}_{lyrics}')
+                            if not os.path.isdir(processed_section_dir):
+                                os.makedirs(processed_section_dir)
+                            audio_section = audio[int(t_start * samplerate):int(t_end * samplerate)]
+                            collapsed_audio_section = np.mean(audio_section, axis=1)  # collapsing L/R to mono
+                            if self.save_songs:
+                                sf.write(os.path.join(processed_section_dir, audio_file), collapsed_audio_section, samplerate)
+                            if i not in pre_fourier_per_section:
+                                pre_fourier_per_section[i] = np.zeros((len(self.track_to_channel), len(collapsed_audio_section)))
+                            pre_fourier_per_section[i][self.track_to_channel[audio_file[:-4]]] = collapsed_audio_section
+
+                for i, (_, lyrics) in enumerate(t2lyrics.items()):
+                    if i not in pre_fourier_per_section:
+                        continue
+
+                    #################
+                    # TODO: Yotam, this part was suggested by co-pilot, Is it correct?
+                    pre_fourier = pre_fourier_per_section[i]
+                    fourier = np.fft.fft(pre_fourier, axis=1)
+                    fourier_per_section[i] = fourier
+                    #################
+
+                    if self.save_pre_fourier:
+                        processed_song_dir = os.path.join(self.audio_segment_dir, dir)
+                        processed_section_dir = os.path.join(processed_song_dir, f'section_{i}_{lyrics}')
+                        np.save(os.path.join(processed_section_dir, f'pre_fourier.npy'), pre_fourier)
+                        if self.save_collapsed:
+                            sf.write(os.path.join(processed_section_dir, 'collapsed.ogg'), pre_fourier.transpose(), samplerate)
+
+                    if self.save_fourier:
+                        processed_song_dir = os.path.join(self.audio_segment_dir, dir)
+                        processed_section_dir = os.path.join(processed_song_dir, f'section_{i}_{lyrics}')
+                        np.save(os.path.join(processed_section_dir, f'fourier.npy'), fourier)
 
 
 
